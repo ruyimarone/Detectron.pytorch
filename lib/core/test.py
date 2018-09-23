@@ -46,7 +46,6 @@ import utils.fpn as fpn_utils
 import utils.image as image_utils
 import utils.keypoints as keypoint_utils
 
-global_stuff = []
 
 def im_detect_all(model, im, box_proposals=None, timers=None):
     """Process the outputs of model for testing
@@ -109,6 +108,36 @@ def im_detect_all(model, im, box_proposals=None, timers=None):
         cls_keyps = None
 
     return cls_boxes, cls_segms, cls_keyps
+
+def im_get_all_masks(model, im):
+    """Returns mask tensors for further downstream processing
+    Modified from im_detect_all
+    """
+
+    box_proposals = None
+    if cfg.TEST.BBOX_AUG.ENABLED:
+        scores, boxes, im_scale, blob_conv = im_detect_bbox_aug(
+            model, im, box_proposals)
+    else:
+        scores, boxes, im_scale, blob_conv = im_detect_bbox(
+            model, im, cfg.TEST.SCALE, cfg.TEST.MAX_SIZE, box_proposals)
+
+    # score and boxes are from the whole image after score thresholding and nms
+    # (they are not separated by class) (numpy.ndarray)
+    # cls_boxes boxes and scores are separated by class and in the format used
+    # for evaluating results
+    scores, boxes, cls_boxes = box_results_with_nms_and_limit(scores, boxes)
+
+    # if cfg.MODEL.MASK_ON and boxes.shape[0] > 0:
+    if cfg.TEST.MASK_AUG.ENABLED:
+        masks = im_detect_mask_aug(model, im, boxes, im_scale, blob_conv)
+    else:
+        masks = im_detect_mask(model, im_scale, boxes, blob_conv)
+
+    cls_segms, masks = segm_results(cls_boxes, masks, boxes, im.shape[0], im.shape[1], raw_masks=True)
+
+    return cls_boxes, cls_segms, masks
+
 
 
 def im_conv_body_only(model, im, target_scale, target_max_size):
@@ -791,7 +820,7 @@ def box_results_with_nms_and_limit(scores, boxes):  # NOTE: support single-batch
     return scores, boxes, cls_boxes
 
 
-def segm_results(cls_boxes, masks, ref_boxes, im_h, im_w):
+def segm_results(cls_boxes, masks, ref_boxes, im_h, im_w, raw_masks=False):
     num_classes = cfg.MODEL.NUM_CLASSES
     cls_segms = [[] for _ in range(num_classes)]
     mask_ind = 0
@@ -806,9 +835,12 @@ def segm_results(cls_boxes, masks, ref_boxes, im_h, im_w):
     ref_boxes = ref_boxes.astype(np.int32)
     padded_mask = np.zeros((M + 2, M + 2), dtype=np.float32)
 
+    raw_mask_data = {}
+
     # skip j = 0, because it's the background class
     for j in range(1, num_classes):
         segms = []
+        raw_mask_data[j] = []
         for _ in range(cls_boxes[j].shape[0]):
             if cfg.MRCNN.CLS_SPECIFIC_MASK:
                 padded_mask[1:-1, 1:-1] = masks[mask_ind, j, :, :]
@@ -832,8 +864,8 @@ def segm_results(cls_boxes, masks, ref_boxes, im_h, im_w):
 
             im_mask[y_0:y_1, x_0:x_1] = mask[
                 (y_0 - ref_box[1]):(y_1 - ref_box[1]), (x_0 - ref_box[0]):(x_1 - ref_box[0])]
-        
-            global_stuff.append(im_mask)
+
+            raw_mask_data[j].append(im_mask)
 
             # Get RLE encoding used by the COCO evaluation API
             rle = mask_util.encode(np.array(im_mask[:, :, np.newaxis], order='F'))[0]
@@ -847,7 +879,7 @@ def segm_results(cls_boxes, masks, ref_boxes, im_h, im_w):
         cls_segms[j] = segms
 
     assert mask_ind == masks.shape[0]
-    return cls_segms
+    return cls_segms, raw_mask_data
 
 
 def keypoint_results(cls_boxes, pred_heatmaps, ref_boxes):
