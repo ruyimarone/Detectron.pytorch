@@ -10,10 +10,7 @@ import pprint
 import subprocess
 from collections import defaultdict
 from six.moves import xrange
-
-# Use a non-interactive backend
-import matplotlib
-matplotlib.use('Agg')
+from argparse import Namespace
 
 import numpy as np
 import cv2
@@ -22,7 +19,6 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 
-import _init_paths
 import nn as mynn
 from core.config import cfg, cfg_from_file, cfg_from_list, assert_and_infer_cfg
 from core.test import im_detect_all
@@ -78,99 +74,56 @@ def parse_args():
 
     return args
 
+class WrappedDetectron:
+    def __init__(self):
+        if not torch.cuda.is_available():
+            sys.exit("Need a CUDA device to run the code.")
 
-def main():
-    """main function"""
+        args = Namespace(dataset = 'coco',
+                cfg_file='configs/baselines/e2e_mask_rcnn_X-101-64x4d-FPN_1x.yaml',
+                load_detectron='data/model_final.101.pkl',
+                image_dir='test_imgs/',
+                cuda=True)
 
-    if not torch.cuda.is_available():
-        sys.exit("Need a CUDA device to run the code.")
+        print('Called with args:')
+        print(args)
 
-    args = parse_args()
-    print('Called with args:')
-    print(args)
+        assert args.image_dir or args.images
+        assert bool(args.image_dir)
 
-    assert args.image_dir or args.images
-    assert bool(args.image_dir) ^ bool(args.images)
+        if args.dataset.startswith("coco"):
+            dataset = datasets.get_coco_dataset()
+            cfg.MODEL.NUM_CLASSES = len(dataset.classes)
+        elif args.dataset.startswith("keypoints_coco"):
+            dataset = datasets.get_coco_dataset()
+            cfg.MODEL.NUM_CLASSES = 2
+        else:
+            raise ValueError('Unexpected dataset name: {}'.format(args.dataset))
 
-    if args.dataset.startswith("coco"):
-        dataset = datasets.get_coco_dataset()
-        cfg.MODEL.NUM_CLASSES = len(dataset.classes)
-    elif args.dataset.startswith("keypoints_coco"):
-        dataset = datasets.get_coco_dataset()
-        cfg.MODEL.NUM_CLASSES = 2
-    else:
-        raise ValueError('Unexpected dataset name: {}'.format(args.dataset))
+        print('load cfg from file: {}'.format(args.cfg_file))
+        cfg_from_file(args.cfg_file)
 
-    print('load cfg from file: {}'.format(args.cfg_file))
-    cfg_from_file(args.cfg_file)
+        assert bool(args.load_detectron)
+        cfg.MODEL.LOAD_IMAGENET_PRETRAINED_WEIGHTS = False  # Don't need to load imagenet pretrained weights
+        assert_and_infer_cfg()
 
-    if args.set_cfgs is not None:
-        cfg_from_list(args.set_cfgs)
+        maskRCNN = Generalized_RCNN()
 
-    assert bool(args.load_ckpt) ^ bool(args.load_detectron), \
-        'Exactly one of --load_ckpt and --load_detectron should be specified.'
-    cfg.MODEL.LOAD_IMAGENET_PRETRAINED_WEIGHTS = False  # Don't need to load imagenet pretrained weights
-    assert_and_infer_cfg()
+        if args.cuda:
+            maskRCNN.cuda()
 
-    maskRCNN = Generalized_RCNN()
-
-    if args.cuda:
-        maskRCNN.cuda()
-
-    if args.load_ckpt:
-        load_name = args.load_ckpt
-        print("loading checkpoint %s" % (load_name))
-        checkpoint = torch.load(load_name, map_location=lambda storage, loc: storage)
-        net_utils.load_ckpt(maskRCNN, checkpoint['model'])
-
-    if args.load_detectron:
         print("loading detectron weights %s" % args.load_detectron)
         load_detectron_weight(maskRCNN, args.load_detectron)
 
-    maskRCNN = mynn.DataParallel(maskRCNN, cpu_keywords=['im_info', 'roidb'],
-                                 minibatch=True, device_ids=[0])  # only support single GPU
+        maskRCNN = mynn.DataParallel(maskRCNN, cpu_keywords=['im_info', 'roidb'],
+                                     minibatch=True, device_ids=[0])  # only support single GPU
 
-    maskRCNN.eval()
-    if args.image_dir:
-        imglist = misc_utils.get_imagelist_from_dir(args.image_dir)
-    else:
-        imglist = args.images
-    num_images = len(imglist)
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
+        maskRCNN.eval()
+        self.model = maskRCNN
+        print("loaded models")
 
-    for i in xrange(num_images):
-        print('img', i)
-        im = cv2.imread(imglist[i])
-        assert im is not None
+    def forward(self, filename):
+        im = cv2.imread(filename)
+        cls_boxes, cls_segms, cls_keyps = im_detect_all(self.model, im)
+        return cls_boxes, cls_segms, cls_keyps
 
-        timers = defaultdict(Timer)
-
-        cls_boxes, cls_segms, cls_keyps = im_detect_all(maskRCNN, im, timers=timers)
-
-        im_name, _ = os.path.splitext(os.path.basename(imglist[i]))
-        vis_utils.vis_one_image(
-            im[:, :, ::-1],  # BGR -> RGB for visualization
-            im_name,
-            args.output_dir,
-            cls_boxes,
-            cls_segms,
-            cls_keyps,
-            dataset=dataset,
-            box_alpha=0.3,
-            show_class=True,
-            thresh=0.7,
-            kp_thresh=2
-        )
-
-    if args.merge_pdfs and num_images > 1:
-        merge_out_path = '{}/results.pdf'.format(args.output_dir)
-        if os.path.exists(merge_out_path):
-            os.remove(merge_out_path)
-        command = "pdfunite {}/*.pdf {}".format(args.output_dir,
-                                                merge_out_path)
-        subprocess.call(command, shell=True)
-
-
-if __name__ == '__main__':
-    main()

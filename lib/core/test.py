@@ -46,6 +46,7 @@ import utils.fpn as fpn_utils
 import utils.image as image_utils
 import utils.keypoints as keypoint_utils
 
+global_stuff = []
 
 def im_detect_all(model, im, box_proposals=None, timers=None):
     """Process the outputs of model for testing
@@ -831,6 +832,8 @@ def segm_results(cls_boxes, masks, ref_boxes, im_h, im_w):
 
             im_mask[y_0:y_1, x_0:x_1] = mask[
                 (y_0 - ref_box[1]):(y_1 - ref_box[1]), (x_0 - ref_box[0]):(x_1 - ref_box[0])]
+        
+            global_stuff.append(im_mask)
 
             # Get RLE encoding used by the COCO evaluation API
             rle = mask_util.encode(np.array(im_mask[:, :, np.newaxis], order='F'))[0]
