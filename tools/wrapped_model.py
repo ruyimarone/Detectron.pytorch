@@ -38,6 +38,7 @@ cv2.ocl.setUseOpenCL(False)
 
 
 def union_masks(masks):
+    masks = list(masks)
     if len(masks) == 1:
         return masks[0] == 1
     return reduce(lambda a, b : (a == 1) | (b == 1), masks)
@@ -70,7 +71,7 @@ def apply_binary_mask(source, content, mask):
 
 
 class WrappedDetectron:
-    def __init__(self):
+    def __init__(self, detectron_root):
 
         ##########
         # CONFIG #
@@ -84,9 +85,9 @@ class WrappedDetectron:
                 sys.exit("Need a CUDA device to run the code.")
 
             args = Namespace(dataset = 'coco',
-                    cfg_file='configs/baselines/e2e_mask_rcnn_X-101-64x4d-FPN_1x.yaml',
-                    load_detectron='data/model_final.101.pkl',
-                    image_dir='test_imgs/',
+                    cfg_file=os.path.join(detectron_root, 'configs/baselines/e2e_mask_rcnn_X-101-64x4d-FPN_1x.yaml'),
+                    load_detectron=os.path.join(detectron_root, 'data/model_final.101.pkl'),
+                    image_dir=os.path.join(detectron_root, 'test_imgs/'),
                     cuda=True)
 
             print("Loaded with parameters:")
@@ -131,16 +132,15 @@ class WrappedDetectron:
         self.dataset = dataset
         print("loaded models")
 
-    def segment_people(self, filename, threshold=0.9):
+    def segment_people(self, cv2_image, threshold=0.9):
         person_id = 1
-        cls_boxes, cls_segms, masks = self.forward(filename)
+        cls_boxes, cls_segms, masks = self.forward(cv2_image)
         person_boxes = cls_boxes[person_id]
         person_masks = masks[person_id]
         #bounding boxes are returned as corners followed by score
         return [(mask, bbox[-1]) for mask, bbox in zip(person_masks, person_boxes) if bbox[-1] > 0.9]
 
-    def forward(self, filename):
-        im = cv2.imread(filename)
-        cls_boxes, cls_segms, masks = im_get_all_masks(self.model, im)
+    def forward(self, cv2_image):
+        cls_boxes, cls_segms, masks = im_get_all_masks(self.model, cv2_image)
         return cls_boxes, cls_segms, masks
 
